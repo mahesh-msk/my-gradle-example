@@ -6,23 +6,81 @@
  * User Manual available at https://docs.gradle.org/6.6/userguide/tutorial_groovy_projects.html
  */
 
+// import com.petebevin.markdown.MarkdownProcessor
+
+ import my.gradle.jenkins.pluginsConfig.*
+ import my.gradle.jenkins.*
+ 
+ def jenkinsVersion
+ def jenkinsHost
+ def jenkinsExtPort
+ def jenkinsJnlpExtPort
+ def containerName
+ def jenkinsPrefix
+ def sshPort
+ def dnsAd
+ def dockerProp=new File(project.rootDir.path+"/Properties/DockerFramework.properties")
+ if (dockerProp.exists()){
+	 FileReader reader=new FileReader(dockerProp.path);
+	 Properties prop=new Properties();
+	 prop.load(reader);
+	 jenkinsVersion = prop.getProperty("jenkinsVersion")
+	 jenkinsHost = prop.getProperty("jenkinsHost")
+	 jenkinsExtPort = prop.getProperty("jenkinsExtPort")
+	 jenkinsJnlpExtPort = prop.getProperty("jenkinsJnlpExtPort");
+	 containerName = prop.getProperty("containerName");
+	 jenkinsPrefix = prop.getProperty("jenkinsPrefix");
+	 sshPort = prop.getProperty("sshPort");
+	 dnsAd = prop.getProperty("dnsAd");
+ }
+ 
+ ext {
+	 dockerImageName = "jenkins/jenkins:${jenkinsVersion}-CC_AS"
+	 dockerPullImageName = "jenkins/jenkins:${jenkinsVersion}"
+	 dockerTag = version
+	 jenkinsPort = 8080
+	 jenkinsURL = project.hasProperty('jenkinsURL') ? jenkinsURL : "http://$jenkinsHost:$jenkinsExtPort/$jenkinsPrefix"
+	 dockerDetached = project.hasProperty('dockerDetached') ? dockerDetached : 'true'
+ //set the password from commandline it can be set by -DmasPass='value'
+	 masPass=System.properties['masPass']
+ }
+ 
 plugins {
 	// Apply the groovy plugin to add support for Groovy
 	id 'groovy'
-
 	// Apply the application plugin to add support for building a CLI application.
 	id 'application'
 	id 'java'
+	//	Base Plugin provides some tasks and conventions that are common to most builds and adds a structure to the build that promotes consistency in how they are run
+	id 'base'
 }
 
 repositories {
 	// Use jcenter for resolving dependencies.
 	// You can declare any Maven/Ivy/file repository here.
-	jcenter()
+	//	jcenter()
+	//	mavenRepo url: 'http://scala-tools.org/repo-releases'
 	mavenCentral()
+	jcenter()
+	gradlePluginPortal()
 }
 
 dependencies {
+	
+	testCompile 'org.codehaus.groovy:groovy-all:2.4.7'
+	testCompile 'org.spockframework:spock-core:1.1-groovy-2.4-rc-3'
+	compile group: 'org.apache.ant', name: 'ant', version: '+'
+	compile group: 'org.yaml', name: 'snakeyaml', version: '+'
+	//testCompile "org.jenkins-ci.main:jenkins-core:$jenkinsVersion"
+	testCompile 'org.jenkins-ci.plugins:job-dsl-core:+'
+	testCompile 'org.json:json:20180130'
+	
+	compile 'org.jsoup:jsoup:1.15.1'
+	
+	testPlugins 'org.jenkins-ci.plugins:job-dsl:+'
+	testPlugins group: 'org.jenkins-ci.plugins', name: 'script-security', version: '1.41'
+	testPlugins group: 'org.jenkins-ci.plugins.workflow', name: 'workflow-aggregator', version: '2.5'
+	testPlugins group: 'org.jenkins-ci.plugins', name: 'bouncycastle-api', version: '2.16.2'
 	// Use the latest Groovy version for building this library
 	implementation 'org.codehaus.groovy:groovy-all:2.5.11'
 
@@ -47,12 +105,687 @@ sourceSets {
 	}
 }
 
-jar {
-	manifest {
-		attributes "Main-Class": '$mainClassName'
+task dockerRun(type: Exec) {
+	group 'Docker'
+	description "Run the jenkins docker container locally, use the 'latest' tag"
+	commandLine 'docker'
+	doFirst {
+		def EnvJENKINS_OPTS="JENKINS_OPTS=--prefix=/$jenkinsPrefix"
+		def EnvJavaOpt="JAVA_OPTS=-server -XX:+AlwaysPreTouch -XX:+HeapDumpOnOutOfMemoryError -Xmx2048m -Djava.net.preferIPv4Stack=true -XX:+UseG1GC -XX:+UseStringDeduplication -XX:+ParallelRefProcEnabled -XX:+DisableExplicitGC -XX:+ExplicitGCInvokesConcurrent -verbose:gc -XX:+UnlockExperimentalVMOptions -XX:+UnlockDiagnosticVMOptions -XX:G1SummarizeRSetStatsPeriod=1 -XX:MaxMetaspaceExpansion=64M -XX:+PrintGC -XX:+PrintGCDetails -XX:+LogVMOutput -XX:LogFile=/var/log/jenkins/jvm.log -Djava.awt.headless=true -Dhttp.proxyHost=172.17.0.1 -Dhttp.proxyPort=3128 -Dhttps.proxyHost=172.17.0.1 -Dhttps.proxyPort=3128 -Djenkins.install.runSetupWizard=false -Dorg.jenkinsci.main.modules.sshd.SSHD.hostName=${jenkinsHost}"
+		args = ['run', dockerDetached == 'true' ? '-d' : '--rm', '--name', containerName, '-p', "$jenkinsExtPort:$jenkinsPort", '-p', "$jenkinsJnlpExtPort:50000",'-p',"$sshPort:$sshPort","--dns=$dnsAd",'-e',"$EnvJavaOpt",'-e',"$EnvJENKINS_OPTS", "$dockerImageName"]
 	}
-
-	from {
-		configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+	doLast {
+		try {
+			if (dockerDetached == 'true') {
+				waitForHTTPResponse(jenkinsURL, 200)
+				println "Jenkins server started at $jenkinsURL"
+			}
+		} catch (e) {
+			throw new GradleException("Could not connect to $jenkinsURL", e)
+		}
+		def hashStdOut = new ByteArrayOutputStream()
+		exec {
+			commandLine "docker"
+			args = ['logs', containerName]
+			standardOutput = hashStdOut
+	}
+	println hashStdOut
 	}
 }
+
+@groovy.transform.TimedInterrupt(200L)
+def void waitForHTTPResponse(String url, int responseCode) {
+	println "Waiting for HTTP response $responseCode for '$url'"
+	boolean isConnected = false
+	while (!isConnected) {
+		try {
+			isConnected = (url.toURL().openConnection().responseCode == responseCode) || (url.toURL().openConnection().responseCode == 403)
+		} catch (any) {
+		}
+		Thread.sleep(500)
+	}
+}
+
+task dockerStop(type: Exec) {
+	group 'Docker'
+	description 'Stop the jenkins docker container'
+	commandLine 'docker'
+	args = ['rm', '-f', '-v', containerName]
+}
+
+task dockerStatus(type: Exec) {
+	group 'Docker'
+	description 'Display the process status of jenkins docker container'
+	commandLine 'docker'
+	args = ['ps', '-a', '-f', "name=$containerName"]
+}
+
+task dockerBuild(type: Exec) {
+	group 'Docker'
+	description "Build the docker image, tag as current version and 'as latest'."
+	commandLine 'docker'
+	//args = ['build', '-t', "$dockerImageName:$dockerTag", '-t', "$dockerImageName:latest", "."]
+	args = ['build', '--no-cache','-t', "$dockerImageName", "."]
+
+}
+
+task dockerPush(type: Exec) {
+	group 'Docker'
+	description 'Push the docker image with the current tag'
+	commandLine 'docker'
+	args = ['push', "$dockerImageName:$dockerTag"]
+}
+task dockerCopyPlugins(type: Exec) {
+	group 'Docker'
+	description 'Copy plugins from docker container'
+	commandLine 'docker'
+	args = ['cp', "$containerName:/var/jenkins_home/plugins","${project.rootDir.path}/rawPlugins"]
+}
+task dockerOnlyStop(type: Exec) {
+	group 'Docker'
+	description 'Stop docker container'
+	commandLine 'docker'
+	args = ['stop', containerName]
+}
+task dockerRemove(type: Exec) {
+	group 'Docker'
+	description 'Remove docker container'
+	commandLine 'docker'
+	args = ['rm', containerName]
+}
+task integration(type: Test) {
+	group 'Test'
+	testClassesDirs = sourceSets.integration.output.classesDirs
+	classpath = sourceSets.integration.runtimeClasspath
+	//forward system properties to test environment
+	systemProperties = [jenkinsURL: jenkinsURL,masPass:masPass,artUserName:artUserName,projectRootDir:project.rootDir.path]
+	testLogging {
+		events 'passed', 'skipped', 'failed'
+	}
+	outputs.upToDateWhen { false }
+}
+task DisableSecurity(type: Exec) {
+	commandLine 'docker'
+	args = ['exec', containerName,'sed','-i',"s/useSecurity>true/useSecurity>false/g",'/var/jenkins_home/config.xml']
+
+}
+task  ContainerRestart(type: Exec) {
+	group 'Docker'
+	commandLine 'docker'
+	doFirst {
+		args = ['restart', containerName]
+	}
+	doLast {
+		try {
+			
+				waitForHTTPResponse(jenkinsURL, 200)
+				println "Jenkins server started at $jenkinsURL"
+			
+		} catch (e) {
+			throw new GradleException("Could not connect to $jenkinsURL", e)
+		}
+	}
+}
+gradle.taskGraph.whenReady { graph ->
+	if (graph.hasTask(runIntegration)) {
+		dockerDetached = 'true'
+	}
+}
+task DockerPull(type: Exec){
+	commandLine 'docker'
+	args = ['pull', "$dockerPullImageName"]
+}
+task AddMas9abtPublicKey(type: Exec){
+	def CreateMas9abtUser="""
+import jenkins.model.*
+import hudson.security.*
+//public key mas9abt
+	def publicKey='ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEA5z/wbTJL3tRObu1YeMO4CfTkRgoGGL6GKuG51W55c1CylRaOAWUKYURhdzu1UabRkDc5D8a0a8BsA0F8llasOJjjcZgXYYcEgwTv7Tffe6Wqkoc0NDbE0FRKJzBQjNLcJb+TZxiabgi2LS6HlXZ2jK51p7XD4BVHxw9sI6SdCy5FL+WUSM+juK9QUj7taeFcRMy4oyrPf8iXPhEFBsd4KdpQ0FGHki7TW6vfX8SPU9VVybizzReuWdThiZD9WEql1uTrQP6SKlGnuf2WlRXvQRoHMB0R/I2LSjCuWtz7WIkW90CGi3IsYJg5e5Ard1BPl9JIvNky/RpBeDEjv1bv7Q== jenkins@abtv5533'
+//create user
+def hudsonRealm = new HudsonPrivateSecurityRealm(false)
+		
+def user =hudsonRealm.createAccount("mas9abt","${masPass}")
+
+    
+   // def email_param = new hudson.tasks.Mailer.UserProperty(email)
+  //  user.addProperty(email_param)
+	
+    //set public key for the user
+    if ( publicKey != "" ) {
+      def keys_param = new org.jenkinsci.main.modules.cli.auth.ssh.UserPropertyImpl(publicKey)
+      user.addProperty(keys_param)
+    }
+println user.getFullName()+" user is created" 
+user.save()
+def instance = Jenkins.getInstance()
+instance.setSecurityRealm(hudsonRealm)
+instance.save()
+
+def strategy = new hudson.security.FullControlOnceLoggedInAuthorizationStrategy()
+strategy.setAllowAnonymousRead(true)
+instance.setAuthorizationStrategy(strategy)
+println 'set Authorization Strategy to "FullControlOnceLoggedInAuthorizationStrategy"'
+instance.save();
+"""
+	File file = new File(project.rootDir.path+"/jenkins-home/init.groovy.d/AddUser.groovy")
+	file.text=CreateMas9abtUser;
+	commandLine 'docker'
+	args = ['cp',project.rootDir.path+"/jenkins-home/init.groovy.d/AddUser.groovy", "$containerName:/var/jenkins_home/init.groovy.d"]
+}
+task runIntegration() {
+	group 'Test'
+	description 'Run in that order: dockerBuild, dockerRun, integration, dockerStop'
+	doFirst{
+		dockerBuild.execute()
+		dockerRun.execute()
+		integration.execute()
+	}
+}
+task DockerLogin(type: Exec){
+	println "${usera}"
+	commandLine 'docker'
+	args = ['login', '-u',"${usera}",'-p',"${passa}", "https://rb-dtr.de.bosch.com/"]
+}
+task DockerLogout(type: Exec){
+	commandLine 'docker'
+	args = ['logout', "https://rb-dtr.de.bosch.com/"]
+}
+project.tasks.create(name: "CreateMasterSSHUser",type: AddMasterSSHUser)
+{
+	userPass=masPass
+}
+project.tasks.create(name: "ConfigureRoleStrategy",type: RoleBasedStrategy)
+{
+	
+}
+project.tasks.create(name: "AddUserPassCreds",type: AddUserPassCred)
+{
+	
+}
+project.tasks.create(name:"createArtifactoryConfig",type: ArtifactoryConfig)
+{
+			
+		userName= artUserName
+		password= artPass
+		desc = artDescription
+		
+}
+
+project.tasks.create(name: "ConfigRTCBuildToolInstallation",type: ConfigureRTCBuildToolInstallation)
+{
+	
+}
+project.tasks.create(name: "ConfigureAccessControl",type: ConfigureAccessControlForBuilds)
+{
+	
+}
+project.tasks.create(name: "InitDCleanup",type: com.bosch.cc.jenkins.CleanInitD)
+{
+	
+}
+project.tasks.create(name: "CreateDockerFile",type: com.bosch.cc.jenkins.CreateDockerFileFromTemplate)
+{
+	jenkinsVer= jenkinsVersion
+}
+project.tasks.create(name: "ConfigBoschUpdateSite",type: AddUpdateSiteManager)
+{
+	
+}
+project.tasks.create(name: "BoschPluginsInstaller",type: com.bosch.cc.jenkins.InstallBoschPlugins)
+{
+	
+}
+project.tasks.create(name: "AddMasterLabel",type: com.bosch.cc.jenkins.AddMasterlabel)
+{
+	
+}
+project.tasks.create(name: "ApplyCasc",type: com.bosch.cc.jenkins.CascHandler)
+{
+	
+}
+
+
+project.tasks.create(name: "SSHDConfigure",type: com.bosch.cc.jenkins.pluginsConfig.ConfigureSSHD)
+{
+	sshPort1 = sshPort
+}
+
+
+task resolveTestPlugins(type: Copy) {
+	from configurations.testPlugins
+	into new File(project.rootDir.path+"/jenkins-home-docker-file", 'plugins')
+	include '*.hpi'
+	include '*.jpi'
+	def mapping = [:]
+
+	doFirst {
+		File InitGroovyDir=new File(project.rootDir.path+"/jenkins-home-docker-file/")
+		if(!InitGroovyDir.exists())
+			{
+				println "Creating a directory at:"+project.rootDir.path+"/jenkins-home-docker-file/"
+				InitGroovyDir.mkdirs();
+			}
+		/*configurations.testPlugins.resolvedConfiguration.resolvedArtifacts.each {
+			mapping[it.file.name] = "${it.name}.${it.extension}"
+		}*/
+	}
+	//rename { mapping[it] }
+
+	/*doLast {
+		List<String> baseNames = source*.name.collect { mapping[it] }.collect { it[0..it.lastIndexOf('.') - 1] }
+		new File(destinationDir, 'index').setText(baseNames.join('\n'), 'UTF-8')
+	}*/
+}
+
+tasks.named('jar') {
+	manifest {
+		attributes('Implementation-Title': project.name,
+		'Implementation-Version': project.version,
+		"Main-Class": '$mainClassName')
+	}
+}
+
+tasks.register('hello') {
+	doLast {
+		println 'Hello world!'
+	}
+}
+
+//tasks.named('hello') {
+//	doFirst {
+//		println 'Hello Mars'
+//	}
+//}
+
+tasks.register('upper') {
+	doLast {
+		String someString = 'mY_nAmE'
+		println "Original: $someString"
+		println "Upper case: ${someString.toUpperCase()}"
+	}
+}
+
+tasks.register('count') {
+	doLast {
+		4.times { print "$it " }
+	}
+}
+
+tasks.register('intro') {
+	dependsOn tasks.hello
+	doLast {
+		println "I'm Gradle"
+	}
+}
+
+tasks.create("checkForReadme") {
+	doLast {
+		if(!project.file("readme.md").exists()){
+			throw new GradleException("project must contain a readme file")
+		}
+	}
+}
+
+
+//create dir
+tasks.register('ensureDirectory') {
+	doLast {
+		mkdir "images"
+	}
+}
+
+
+//move dir
+tasks.register('moveReports') {
+	doLast {
+		ant.move file: "${buildDir}/reports",
+		todir: "${buildDir}/toArchive"
+	}
+}
+
+//Deleting a directory
+tasks.register('myClean', Delete) {
+	delete 'build'
+}
+
+
+//Deleting files matching a specific pattern
+tasks.register('cleanTempFiles', Delete) {
+	delete fileTree("src").matching {
+		include "**/*.tmp"
+	}
+}
+
+
+//rename
+tasks.register('copyWithTruncate', Copy) {
+	from "config"
+	rename { String filename ->
+		if (filename.size() > 10) {
+			return filename[0..7] + "~" + filename.size()
+		}
+		else return filename
+	}
+	into "toArchive"
+}
+
+//copying a generated report into a directory that will be packed into an archive, such as a ZIP or TAR:
+tasks.register('copyReport', Copy) {
+	from layout.buildDirectory.dir("reports/tests/test/index.html")
+	into layout.buildDirectory.dir("toArchive")
+}
+
+
+//using implicit build path
+tasks.register('copyReport2', Copy) {
+	from "$buildDir/reports/tests/test/index.html"
+	into "$buildDir/toArchive"
+}
+
+//Copy Task
+task copyToNewFolder(type: Copy) {
+	from '/src/main/resources/'
+	include '**/*.csv'
+	exclude '**/exclude/*.csv'
+	into 'MyNewFolder'
+}
+
+
+//copy multiple files
+tasks.register('copyReportsForArchiving', Copy) {
+	from layout.buildDirectory.file("reports/tests/test/index.html"), layout.projectDirectory.file("reports/tests/test/index2.html")
+	into layout.buildDirectory.dir("toArchive")
+}
+
+
+//flat filter
+tasks.register('copyPdfReportsForArchiving', Copy) {
+	from 'src/main/resources'
+	include "*.pdf"
+	into 'temp'
+}
+
+//deep filter
+tasks.register('copyPdfReportsForArchiving2', Copy) {
+	from 'src/main/resources'
+	include "/**/*.pdf"
+	into 'temp'
+}
+
+
+//Creating archives (zip, tar, etc.)
+tasks.register('packageDistribution', Zip) {
+	archiveFileName = "my-distribution.zip"
+	destinationDirectory = layout.buildDirectory.dir('dist')
+
+	from layout.buildDirectory.dir("test-results")
+}
+
+//Unpacking a ZIP file
+tasks.register('packageDistribution3', Zip) {
+	from "i18n"
+	into "temp"
+}
+
+//Unpacking a ZIP file
+tasks.register('unpackFiles2', Copy) {
+	from zipTree("i18n/AutomatedMTCBuilder.zip")
+	into layout.buildDirectory.dir("resources")
+}
+
+
+//Using the Base Plugin for its archive name convention
+tasks.register('packageDistribution2', Zip) {
+	from('config') {
+		exclude "**/*.pdf"
+		into "temp"
+	}
+}
+
+
+// This tasks copies all the files starts with Se inside the resource directory and subdirectories into build/only folder
+task copyAllFileStartWithSe(type: Copy) {
+	from '/src/main/resources/'
+	into 'build/only'
+	include '**/Se*.pdf'
+}
+
+//A copy task mapping source directory structure onto a new destination structure
+task complexCopy(type: Copy) {
+	from('src/main/resources') {
+		// file into /templete and /template into complecopy/resources
+		include '**/*.pdf'
+		into 'templates'
+	}
+
+	from('config') // all the file into complecopy/resources
+	from('i18n') {
+		// file into  into complecopy/resources
+		exclude 'Development*.groovy'
+	}
+	into 'compleCopy1/resources'
+}
+
+//Transforming Directory Structure
+task complexCopy2(type: Copy) {
+	from('src/main/resources') {
+		include '**/*.pdf'
+		into 'templates'
+	}
+	from('i18n')
+	from('config') {
+		exclude 'Development*.groovy'
+		into 'config'
+	}
+	into 'compleCopy2/resources'
+}
+
+
+//  Renaming Files During Copy
+
+task renameJava(type: Copy) {
+	from '/src/main/java/my/gradle/example'
+	include '**/*.java'
+	into 'copyJava'
+	//	rename(/file-template-(\d+)/, 'production-file-$1.txt') //Renaming files using regular expressions
+
+	rename { fileName ->
+		// Renaming files programmatically using closure
+		"java-file${(fileName - 'Test')}"
+	}
+}
+
+
+//	Filtering and Transforming Files -> perform transformations on the content of the copied files.
+// -------Keyword Expansion
+task copyProductionConfig(type: Copy) {
+	def versionId = 1.6
+	from 'config'
+	include 'config.properties'
+	into 'temp/config'
+	expand([
+		databaseHostname: 'db.company.com',
+		version: versionId,
+		buildNumber: (int)(Math.random() * 1000),
+		date: new Date()
+	])
+}
+
+//------Filtering Line by Line
+//Getting some error
+task markdown(type: Copy) {
+	//	def markdownProcessor = new MarkdownProcessor()
+	into 'temp/i18n'
+	from 'i18n'
+	include 'todo.md'
+	rename { it - '.md' + '.html'}
+	filter { line ->
+		markdownProcessor.markdown(line)
+	}
+}
+
+//------ Using fileTree() with includes and excludes given in a map literal
+//def noBackups = fileTree(dir: 'src/main/java', excludes: ['**/*~'])
+//def xmlFilesOnly = fileTree(dir: 'src/main/java', includes: ['**/*.xml'])
+
+
+//fileCollection
+task copyConfig1(type: Copy) {
+	from 'config'
+	into 'temp/config'
+}
+
+task printFiles{
+	println "HELPFUL:"
+	println files(copyConfig1).files
+}
+
+task naiveFileLister {
+	doLast {
+		println fileTree('src/main').files
+	}
+}
+
+task convFileToPath {
+	doLast{
+		println file('/src/main/java/my/gradle/example/Test.java').toString()
+	}
+}
+
+
+task intersectionSample(type: Copy){
+
+	//		def include = fileTree(dir: 'config', exclude: '*')
+	//		def exclude = fileTree(dir: 'config', include: '*.properties')
+	//		def all = include - exclude
+	from 'config'
+	//		include "${all}"
+	into 'temp/config'
+}
+
+
+
+tasks.register('listFile') {
+    doLast {
+        File srcDir
+
+        // Create a file collection using a closure
+        collection = layout.files { srcDir.listFiles() }
+
+        srcDir = file('src')
+        println "Contents of $srcDir.name"
+        collection.collect { relativePath(it) }.sort().each { println it }
+
+        srcDir = file('src2')
+        println "Contents of $srcDir.name"
+        collection.collect { relativePath(it) }.sort().each { println it }
+		//Using a file collection
+		// Iterate over the files in the collection
+		collection.each { File file ->
+			println file.name
+		}
+		
+		// Convert the collection to various types
+		Set set = collection.files
+		Set set2 = collection as Set
+		List list = collection as List
+		String path = collection.asPath
+		File file = collection.singleFile
+		
+		FileCollection textFiles = collection.filter { File f ->
+			f.name.endsWith(".txt")
+		}
+		
+		// Add and subtract collections
+		def union = collection + layout.files('src/file2.txt')
+		def difference = collection - layout.files('src/file2.txt')
+		
+		// Convert the collection to various types
+//		Set set = collection.files
+//		Set set2 = collection as Set
+//		List list = collection as List
+//		String path = collection.asPath
+//		File file = collection.singleFile
+		
+    }
+}
+
+
+//A file tree is a file collection that retains the directory structure of the files it contains
+task fileTreeEx{
+	// Create a file tree with a base directory
+	ConfigurableFileTree tree = fileTree(dir: 'src/main')
+	
+	// Add include and exclude patterns to the tree
+	tree.include '**/*.java'
+	tree.exclude '**/Abstract*'
+	
+	// Create a tree using closure
+	tree = fileTree('src') {
+		include '**/*.java'
+	}
+	
+	// Create a tree using a map
+	tree = fileTree(dir: 'src', include: '**/*.java')
+	tree = fileTree(dir: 'src', includes: ['**/*.java', '**/*.xml'])
+	tree = fileTree(dir: 'src', include: '**/*.java', exclude: '**/*test*/**')
+	
+	
+	
+	// Iterate over the contents of a tree
+	tree.each {File file ->
+		println file
+	}
+	
+	// Filter a tree
+	FileTree filtered = tree.matching {
+		include 'org/gradle/api/**'
+	}
+	
+	// Add trees together
+	FileTree sum = tree + fileTree(dir: 'src/test')
+	
+	// Visit the elements of the tree
+	tree.visit {element ->
+		println "$element.relativePath => $element.file"
+	}
+	
+	
+	
+}
+
+
+
+
+
+////Creating a path relative to a parent project
+//File configFile = file("$rootDir/shared/config.xml")
+
+
+//println sourceSets.main.allSource.files
+//println sourceSets.main.output.files
+
+//// Using a relative path
+//File configFile = file('src/config.xml')
+//
+//// Using an absolute path
+//configFile = file(configFile.absolutePath)
+//
+//// Using a File object with a relative path
+//configFile = file(new File('src/config.xml'))
+//
+//// Using a java.nio.file.Path object with a relative path
+//configFile = file(Paths.get('src', 'config.xml'))
+//
+//// Using an absolute java.nio.file.Path object
+//configFile = file(Paths.get(System.getProperty('user.home')).resolve('global-config.xml'))
+
+
+//Changing default excludes in the settings script
+//settings.gradle
+//
+//import org.apache.tools.ant.DirectoryScanner
+//
+//DirectoryScanner.removeDefaultExclude('**/.git')
+//DirectoryScanner.removeDefaultExclude('**/.git/**')
+

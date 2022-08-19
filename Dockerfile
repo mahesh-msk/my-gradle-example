@@ -1,0 +1,42 @@
+#  ---------------------- (TicketFly DockerFile) -------------------------
+#FROM jenkins/jenkins:2.75-alpine
+
+#ENV JENKINS_REF /usr/share/jenkins/ref
+
+# install jenkins plugins
+#COPY jenkins-home/plugins.txt $JENKINS_REF/
+#RUN /usr/local/bin/plugins.sh $JENKINS_REF/plugins.txt
+
+#ENV JAVA_OPTS -Dorg.eclipse.jetty.server.Request.maxFormContentSize=100000000 \
+# 			  -Dorg.apache.commons.jelly.tags.fmt.timeZone=America/Los_Angeles \
+#			  -Dhudson.diyChunking=false \
+# 			  -Djenkins.install.runSetupWizard=false
+
+# copy scripts and ressource files
+#COPY jenkins-home/*.* $JENKINS_REF/
+#COPY jenkins-home/userContent $JENKINS_REF/userContent
+#COPY jenkins-home/jobs $JENKINS_REF/jobs/
+#COPY jenkins-home/init.groovy.d $JENKINS_REF/init.groovy.d/
+#COPY jenkins-home/dsl/managedJobs.groovy $JENKINS_REF/dsl/managedJobs.groovy.override
+
+#  --------------- (TicketFly DockerFile ends here) -----------------------
+
+
+# -------- Custom Adaptation for CC Jenkins image, taking CI-JMaaS as Base Image ------------ 
+#FROM rb-dtr.de.bosch.com/ci-jmaas/lts_alpine:2.60.3_usr
+FROM jenkins/jenkins:2.190.1-alpine
+ENV JENKINS_REF /usr/share/jenkins/ref
+
+
+#--------configure proxy to install the jenkins plugins------------------
+ENV http_proxy http://172.17.0.1:3128
+ENV https_proxy http://172.17.0.1:3128
+
+
+COPY jenkins-home/plugins.txt $JENKINS_REF/
+RUN xargs /usr/local/bin/install-plugins.sh < $JENKINS_REF/plugins.txt 
+
+ 
+#TODO: This only works if the gradle build is run if wither one of the tasks "CreateMas9Abt" or "ConfigureRoleStrategy" or "anything else too ?"
+# copy scripts and ressource files
+COPY jenkins-home-docker-file/init.groovy.d $JENKINS_REF/init.groovy.d/

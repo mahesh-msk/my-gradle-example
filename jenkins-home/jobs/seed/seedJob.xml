@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <actions/>
+  <description/>
+  <keepDependencies>false</keepDependencies>
+  <properties/>
+  <scm class="hudson.scm.NullSCM"/>
+  <canRoam>true</canRoam>
+  <disabled>false</disabled>
+  <blockBuildWhenDownstreamBuilding>false</blockBuildWhenDownstreamBuilding>
+  <blockBuildWhenUpstreamBuilding>false</blockBuildWhenUpstreamBuilding>
+  <triggers/>
+  <concurrentBuild>false</concurrentBuild>
+  <builders>
+    <javaposse.jobdsl.plugin.ExecuteDslScripts plugin="job-dsl@1.67">
+      <scriptText>def StringData='''node('master')
+{
+	stage('set environment variable')
+    {
+    	withEnv(['EnvVariable=Testing Environment Variable']) 
+    	{ 
+        	String EnvVariableValue = "${env.EnvVariable}"
+        	stage('compare environment variable')
+        	{
+            	if(EnvVariableValue.equals("Testing Environment Variable"))
+            	{
+            		println "TEST PASSED"
+            	}
+            	else
+            	{
+            		println "TEST FAILED"
+            		error 'Build Failed. Environmental variable does not match'
+            	}
+        	}
+    	}
+    }
+}'''
+def Job=pipelineJob('trial')
+Job.with
+		{
+			println "adding features to the job "
+			definition 
+			{
+				cps
+              {
+					script(StringData)
+					sandbox(false)
+				}
+			}
+			logRotator
+			{
+				daysToKeep(14)
+			}	
+		}</scriptText>
+      <usingScriptText>true</usingScriptText>
+      <sandbox>false</sandbox>
+      <ignoreExisting>false</ignoreExisting>
+      <ignoreMissingFiles>false</ignoreMissingFiles>
+      <failOnMissingPlugin>false</failOnMissingPlugin>
+      <unstableOnDeprecation>false</unstableOnDeprecation>
+      <removedJobAction>IGNORE</removedJobAction>
+      <removedViewAction>IGNORE</removedViewAction>
+      <removedConfigFilesAction>IGNORE</removedConfigFilesAction>
+      <lookupStrategy>JENKINS_ROOT</lookupStrategy>
+    </javaposse.jobdsl.plugin.ExecuteDslScripts>
+  </builders>
+  <publishers/>
+  <buildWrappers/>
+</project>
